@@ -11,6 +11,7 @@ import locale
 import os
 import re
 from socket import timeout as SocketTimeout
+from StringIO import StringIO
 
 
 # this is quote from the shlex module, added in py3.3
@@ -153,6 +154,31 @@ class SCPClient(object):
         else:
             self._send_files(files)
 
+    def put_buffer(self, string_buffer, filename, permissions, remote_path=b'.'):
+        """
+        Transfer string buffer to remote host.
+        @param string_buffer: A string buffer to be transferred.
+        @type string_buffer: string
+        @param filename: Name the file will be called on the remote host.
+        @type filename: string
+        @param permissions: Four character string representing the permissions (e.g. '0644')
+        @type permissions: string
+        @param remote_path: path in which to receive the files on the remote
+            host. defaults to '.'
+        @type remote_path: str
+        @param recursive: transfer files and directories recursively
+        @type recursive: bool
+        """
+        self.channel = self._open()
+        self._pushed = 0
+        self.channel.settimeout(self.socket_timeout)
+        scp_command = b'scp -t '
+        self.channel.exec_command(scp_command +
+                                  self.sanitize(asbytes(remote_path)))
+        self._recv_confirm()
+
+        self._send_buffer(string_buffer, filename, permissions)
+
     def get(self, remote_path, local_path='',
             recursive=False, preserve_times=False):
         """
@@ -250,6 +276,37 @@ class SCPClient(object):
             chan.sendall('\x00')
             file_hdl.close()
             self._recv_confirm()
+
+    def _send_buffer(self, string_buffer, filename, permissions):
+        file_hdl = StringIO(string_buffer)
+        basename = asbytes(filename)
+        mode = permissions
+        size = file_hdl.len
+
+        # The protocol can't handle \n in the filename.
+        # Quote them as the control sequence \^J for now,
+        # which is how openssh handles it.
+        self.channel.sendall(("C%s %d " % (mode, size)).encode('ascii') +
+                             basename.replace(b'\n', b'\\^J') + b"\n")
+        self._recv_confirm()
+        file_pos = 0
+        if self._progress:
+            if size == 0:
+                # avoid divide-by-zero
+                self._progress(basename, 1, 1)
+            else:
+                self._progress(basename, size, 0)
+        buff_size = self.buff_size
+        chan = self.channel
+
+        while file_pos < size:
+            chan.sendall(file_hdl.read(buff_size))
+            file_pos = file_hdl.tell()
+            if self._progress:
+                self._progress(basename, size, file_pos)
+        chan.sendall('\x00')
+        file_hdl.close()
+        self._recv_confirm()
 
     def _chdir(self, from_dir, to_dir):
         # Pop until we're one level up from our next push.
